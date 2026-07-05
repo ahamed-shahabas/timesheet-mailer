@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Timesheet Bulk Mailer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1115; --card:#171a21; --border:#2a2e37; --text:#e8eaed;
+    --muted:#9aa0a6; --accent:#4f8cff; --ok:#3ecf8e; --err:#ff6b6b;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg);
+    color:var(--text); padding:40px 20px; display:flex; justify-content:center;
+  }
+  .wrap{width:100%; max-width:720px;}
+  h1{font-size:22px; margin-bottom:4px;}
+  p.sub{color:var(--muted); margin-top:0; font-size:14px;}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px;}
+  label{display:block; font-size:13px; color:var(--muted); margin-bottom:6px;}
+  input[type=file], input[type=text], textarea{
+    width:100%; padding:10px; border-radius:6px; border:1px solid var(--border);
+    background:#0d0f13; color:var(--text); font-size:13px;
+  }
+  textarea{min-height:70px; font-family:inherit;}
+  button{
+    background:var(--accent); color:#fff; border:none; padding:12px 20px;
+    border-radius:8px; font-size:14px; cursor:pointer; font-weight:600;
+  }
+  button:disabled{opacity:.5; cursor:not-allowed;}
+  table{width:100%; border-collapse:collapse; font-size:13px; margin-top:10px;}
+  th,td{padding:8px; border-bottom:1px solid var(--border); text-align:left;}
+  th{color:var(--muted); font-weight:500;}
+  .status{font-size:12px; padding:3px 8px; border-radius:12px; display:inline-block;}
+  .pending{background:#2a2e37; color:var(--muted);}
+  .sent{background:rgba(62,207,142,.15); color:var(--ok);}
+  .failed{background:rgba(255,107,107,.15); color:var(--err);}
+  .missing{background:rgba(255,193,7,.15); color:#ffc107;}
+  .row{display:flex; gap:10px; align-items:center;}
+  .row > div{flex:1;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>📄 Timesheet Bulk Mailer</h1>
+  <p class="sub">Upload your list (Name / Email / File Path columns) and matching PDFs, then send in one click.</p>
+
+  <div class="card">
+    <label>1. Backend API URL (your deployed server)</label>
+    <input type="text" id="apiUrl" placeholder="https://your-backend.onrender.com" value="">
+  </div>
+
+  <div class="card">
+    <label>2. Upload Excel/CSV (columns: Name, Email, File Path)</label>
+    <input type="file" id="listFile" accept=".xlsx,.xls,.csv">
+  </div>
+
+  <div class="card">
+    <label>3. Upload the PDF attachments (select all at once — matched to rows by file name)</label>
+    <input type="file" id="attachments" multiple accept="application/pdf">
+  </div>
+
+  <div class="card">
+    <label>Email subject</label>
+    <input type="text" id="subject" value="Timesheet">
+    <br><br>
+    <label>Email body (use {name} as placeholder)</label>
+    <textarea id="bodyTpl">Dear {name},
+
+Please find attached your timesheet.
+
+Regards</textarea>
+  </div>
+
+  <div class="card" id="previewCard" style="display:none;">
+    <div class="row" style="margin-bottom:10px;">
+      <div><strong id="rowCount"></strong></div>
+      <button id="sendBtn">🚀 Send All Emails</button>
+    </div>
+    <table>
+      <thead><tr><th>Name</th><th>Email</th><th>File</th><th>Status</th></tr></thead>
+      <tbody id="tbody"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let rows = [];
+let fileMap = {}; // filename -> File object
+
+document.getElementById('listFile').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const data = await file.arrayBuffer();
+  const wb = XLSX.read(data);
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const json = XLSX.utils.sheet_to_json(ws, { defval: '' });
+  rows = json
+    .filter(r => r.Name && r.Email)
+    .map(r => ({
+      name: r.Name,
+      email: r.Email,
+      filePath: r['File Path'] || '',
+      fileName: (r['File Path'] || '').split(/[\\/]/).pop(),
+      status: 'pending'
+    }));
+  renderTable();
+});
+
+document.getElementById('attachments').addEventListener('change', (e) => {
+  fileMap = {};
+  [...e.target.files].forEach(f => fileMap[f.name] = f);
+  renderTable();
+});
+
+function renderTable() {
+  if (!rows.length) return;
+  document.getElementById('previewCard').style.display = 'block';
+  document.getElementById('rowCount').textContent = `${rows.length} recipient(s) loaded`;
+  const tbody = document.getElementById('tbody');
+  tbody.innerHTML = '';
+  rows.forEach((r, i) => {
+    const hasFile = !!fileMap[r.fileName];
+    const status = hasFile ? r.status : 'missing';
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${r.name}</td><td>${r.email}</td><td>${r.fileName || '—'}</td>
+      <td><span class="status ${status}" id="status-${i}">${status}</span></td>`;
+    tbody.appendChild(tr);
+  });
+}
+
+document.getElementById('sendBtn').addEventListener('click', async () => {
+  const apiUrl = document.getElementById('apiUrl').value.trim().replace(/\/$/, '');
+  if (!apiUrl) { alert('Enter your backend API URL first.'); return; }
+  const subject = document.getElementById('subject').value;
+  const bodyTpl = document.getElementById('bodyTpl').value;
+  const btn = document.getElementById('sendBtn');
+  btn.disabled = true;
+  btn.textContent = 'Sending...';
+
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    const statusEl = document.getElementById(`status-${i}`);
+    const f = fileMap[r.fileName];
+    if (!f) { statusEl.textContent = 'missing'; statusEl.className = 'status missing'; continue; }
+
+    const fd = new FormData();
+    fd.append('to', r.email);
+    fd.append('subject', subject);
+    fd.append('body', bodyTpl.replace('{name}', r.name));
+    fd.append('attachment', f, r.fileName);
+
+    statusEl.textContent = 'sending...';
+    try {
+      const res = await fetch(`${apiUrl}/send-email`, { method: 'POST', body: fd });
+      if (!res.ok) throw new Error(await res.text());
+      statusEl.textContent = 'sent';
+      statusEl.className = 'status sent';
+    } catch (err) {
+      statusEl.textContent = 'failed';
+      statusEl.className = 'status failed';
+      console.error(r.email, err);
+    }
+  }
+  btn.disabled = false;
+  btn.textContent = '🚀 Send All Emails';
+});
+</script>
+</body>
+</html>
